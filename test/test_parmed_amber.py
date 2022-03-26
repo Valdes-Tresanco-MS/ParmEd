@@ -2552,6 +2552,20 @@ class TestAmberMdin(FileIOTestCase):
         mdin4.change('cntrl', 'igb', 10)
         mdin4.change('pb', 'bcfl', 1)
 
+        fn2 = self.get_fn('test2.mdin', written=True)
+        mdin5 = mdin.Mdin(program='gbnsr6')
+        self.assertEqual(mdin5.cntrl_nml['inp'], 1)
+        self.assertEqual(mdin5.gbnsr6_nml['epsin'], 1.0)
+        self.assertEqual(mdin5.gbnsr6_nml['epsout'], 78.5)
+        mdin5.write(fn2)
+        mdin6 = mdin.Mdin(program='gbnsr6')
+        mdin6.read(fn2)
+        for var in mdin5.cntrl_nml.keys():
+            self.assertEqual(mdin5.cntrl_nml[var], mdin6.cntrl_nml[var])
+        for var in mdin5.gbnsr6_nml.keys():
+            self.assertEqual(mdin5.gbnsr6_nml[var], mdin6.gbnsr6_nml[var])
+
+
 class TestRst7Class(FileIOTestCase):
     """ Test the Rst7 class """
 
