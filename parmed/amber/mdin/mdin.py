@@ -29,6 +29,7 @@ from parmed.amber.mdin.ewald import ewald
 from parmed.amber.mdin.pb import pb
 from parmed.amber.mdin.qmmm import qmmm
 from parmed.amber.mdin.rism import rism
+from parmed.amber.mdin.gbnsr6 import gbnsr6
 from parmed.exceptions import InputError
 from parmed.utils.six import string_types
 from parmed.utils.six.moves import range
@@ -58,6 +59,7 @@ class Mdin(object):
         self.pb_obj = pb()       # object with pb namelist vars in a dictionary
         self.qmmm_obj = qmmm()   # object with qmmm namelist vars in a dictionary
         self.rism_obj = rism()   # object with rism namelist vars in a dictionary
+        self.gbnsr6_obj = gbnsr6()   # object with gbnsr6 namelist vars in a dictionary
         self.verbosity = 0       # verbosity level: 0 -- print nothing
                                  #                  1 -- print errors
                                  #                  2 -- 1 + warnings
@@ -74,6 +76,8 @@ class Mdin(object):
         self.qmmm_nml_defaults = {}  # dictionary with default qmmm namelist vars
         self.rism_nml = {}           # dictionary with rism namelist vars
         self.rism_nml_defaults = {}  # dictionary with default rism namelist vars
+        self.gbnsr6_nml = {}           # dictionary with gbnsr6 namelist vars
+        self.gbnsr6_nml_defaults = {}  # dictionary with default gbnsr6 namelist vars
         self.valid_namelists = []    # array with valid namelists for each program
         self.title = 'mdin prepared by mdin.py'   # title for the mdin file
 
@@ -93,6 +97,10 @@ class Mdin(object):
             self.cntrl_nml = self.cntrl_obj.pmemd
             self.ewald_nml = self.ewald_obj.pmemd
             self.valid_namelists = ['cntrl','ewald']
+        elif self.program == "gbnsr6":
+            self.cntrl_nml = self.cntrl_obj.gbnsr6
+            self.gbnsr6_nml = self.gbnsr6_obj.gbnsr6
+            self.valid_namelists = ['cntrl', 'gb']
         else:
             raise InputError('Error: program (%s) unrecognized!' %
                                    self.program)
@@ -102,6 +110,7 @@ class Mdin(object):
         self.pb_nml_defaults = self.pb_nml.copy()
         self.qmmm_nml_defaults = self.qmmm_nml.copy()
         self.rism_nml_defaults = self.rism_nml.copy()
+        self.gbnsr6_nml_defaults = self.gbnsr6_nml.copy()
 
    #-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#
 
@@ -176,15 +185,14 @@ class Mdin(object):
         # print the qmmm namelist if any variables differ from the original
         line = ' '
         has_been_printed = False # keep track if this namelist has been printed
-        if self.cntrl_nml['ifqnt'] == 1:
+        if 'ifqnt' in self.cntrl_nml and self.cntrl_nml['ifqnt'] == 1:
             for var in self.qmmm_nml.keys():
                 if self.qmmm_nml[var] == self.qmmm_nml_defaults[var]: continue
                 if not has_been_printed:
                     file.write('&qmmm\n')
                     has_been_printed = True
                 if isinstance(self.qmmm_nml_defaults[var], string_types):
-                    line = addOn(line, "%s='%s', " % (var, self.qmmm_nml[var]),
-                                 file)
+                    line = addOn(line, "%s='%s', " % (var, self.qmmm_nml[var]), file)
                 else:
                     line = addOn(line, "%s=%s, " % (var, self.qmmm_nml[var]), file)
       
@@ -198,20 +206,41 @@ class Mdin(object):
 
         # print the rism namelist
         line = ' '
-        if self.cntrl_nml['irism'] == 1:
+        if 'irism' in self.cntrl_nml and self.cntrl_nml['irism'] == 1:
             file.write('&rism\n')
             for var in self.rism_nml.keys():
                 if self.rism_nml[var] == self.rism_nml_defaults[var]: continue
-                if var == 'closure':
-                    line = addOn(line, "%s=%s, " % (var, [str(x) for x in self.rism_nml[var]]), file)
-                elif var == 'tolerance' and ',' not in var:
-                    line = addOn(line, "%s=%s, " % (var, ','.join(map(str, [self.rism_nml[var]]))), file)
-                elif isinstance(self.rism_nml_defaults[var], string_types):
-                    line = addOn(line, "%s='%s', " % (var, self.rism_nml[var]), file)
-                elif isinstance(self.rism_nml_defaults[var], (list, tuple)):
-                    line = addOn(line, "%s=%s, " % (var, ','.join(map(str, self.rism_nml[var]))), file)
+                if isinstance(self.rism_nml_defaults[var], (list, tuple)):
+                    int_type = type(self.rism_nml_defaults[var][0])
+                    if int_type is str:
+                        temp_out = ','.join(map(lambda x: f"'{x}'", self.rism_nml[var]))
+                        line = addOn(line, "%s=%s, " % (var, temp_out), file)
+                    else:
+                        line = addOn(line, "%s=%s, " % (var, ','.join(map(str, self.rism_nml[var]))), file)
                 else:
                     line = addOn(line, "%s=%s, " % (var, self.rism_nml[var]), file)
+
+            # flush any remaining items that haven't been printed to the mdin file
+            if len(line.strip()) != 0:
+                file.write(line + '\n')
+
+            # end the namelist
+            file.write('/\n')
+
+        # print the gb (bnsr6) namelist if any variables differ from the default
+        line = ' '
+        if self.gbnsr6_nml:
+            file.write('&gb\n')
+            from icecream import ic
+            for var in self.gbnsr6_nml.keys():
+                if self.gbnsr6_nml[var] == self.gbnsr6_nml_defaults[var]: continue
+
+                ic(self.gbnsr6_nml_defaults[var], type(self.gbnsr6_nml_defaults[var]))
+
+                if isinstance(self.gbnsr6_nml_defaults[var], string_types):
+                    line = addOn(line, "%s='%s', " % (var, self.gbnsr6_nml[var]), file)
+                else:
+                    line = addOn(line, "%s=%s, " % (var, self.gbnsr6_nml[var]), file)
 
             # flush any remaining items that haven't been printed to the mdin file
             if len(line.strip()) != 0:
@@ -346,14 +375,18 @@ class Mdin(object):
             if variable in self.rism_nml.keys():
                 mytype = type(self.rism_nml_defaults[variable])
                 if isinstance(value, list):
-                    if all(isinstance(x, str) for x in value):
-                        self.rism_nml[variable] = str(', '.join(map(lambda x: f"'{x}'", value)))[1:-1]
-                    else:
-                        self.rism_nml[variable] = value[0] if len(value) == 1 else value
+                    int_type = type(self.rism_nml_defaults[variable][0])
+                    self.rism_nml[variable] = list(map(int_type, value))
                 else:
                     self.rism_nml[variable] = mytype(value)
             else:
                 raise InputError('Unknown variable (%s) in &rism' % variable)
+        elif namelist == 'gb':
+            if variable in self.gbnsr6_nml.keys():
+                mytype = type(self.gbnsr6_nml_defaults[variable])
+                self.gbnsr6_nml[variable] = mytype(value)
+            else:
+                raise InputError('Unknown variable (%s) in &gb!' % variable)
         else:
             raise InputError('Unknown namelist (%s)!' % namelist)
 
@@ -479,6 +512,10 @@ class Mdin(object):
         self.change('cntrl','maxcyc', maxcyc)
         self.change('cntrl','ncyc', ncyc)
         self.change('cntrl','ntmin', ntmin)
+
+    def rism(self, imin=5, irism=1):
+        self.change('cntrl', 'imin', imin)
+        self.change('cntrl', 'irism', irism)
 
     #-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#-#
 
