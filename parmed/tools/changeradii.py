@@ -392,6 +392,19 @@ def charmm_radii(parm):
         if atom.residue.name in ['ALA', 'ARG', 'ASN', 'ASP', 'ASPP', 'CYS', 'GLN', 'GLU', 'GLUP', 'GLY', 'HSD',
                                  'HSE', 'HSP', 'ILE', 'LEU', 'LYS', 'LSN', 'MET', 'PHE', 'PRO', 'SER', 'SERD',
                                  'THR', 'TRP', 'TYR', 'VAL', 'ALAD', 'CYM', 'CYSD']:
+            # scalar wmain set 2.3 sele chem C* end
+            # scalar wmain set 1.8 sele chem O* end
+            # scalar wmain set 2.3 sele chem N* end
+            # scalar wmain set 2.3 sele chem S* end
+            if atom.name.startswith('C'):
+                atom.solvent_radius = 2.30
+            if atom.name.startswith('O'):
+                atom.solvent_radius = 1.8
+            if atom.name.startswith('N'):
+                atom.solvent_radius = 2.30
+            if atom.name.startswith('S'):
+                atom.solvent_radius = 2.30
+
             # !Patches CT3 N-Methylamide C-terminus
             # !        ACE acetylated N-terminus (ACP for PRO)
             # scalar wmain set 2.06 sele (type CAY .or. type CAT) end
@@ -453,7 +466,7 @@ def charmm_radii(parm):
             #        ! for ARG, GLN, ILE, LYS, MET, PHE, THR, TRP, VAL,
             #              HSP, HSD, HSE
             if atom.residue.name in ['ARG', 'GLN', 'ILE', 'LYS', 'MET', 'PHE', 'THR', 'TRP', 'VAL',
-                                     'HSP', 'HSD', 'HSE', 'LEU']:
+                                     'HSP', 'HSD', 'HSE']:
                 if atom.name.startswith('CG'):
                     atom.solvent_radius = 2.46
             # scalar wmain set 2.77 sele resnam GLU .and. type CG end
@@ -492,8 +505,7 @@ def charmm_radii(parm):
             #                           type CD* .or. type CZ))  end
             #        ! for TYR, PHE rings
             if atom.residue.name in ['TYR', 'PHE']:
-                if atom.name.startswith('CE') or atom.name.startswith('CD') or atom.name.startswith('CG') or \
-                        atom.name == 'CZ':
+                if atom.name.startswith('CE') or atom.name.startswith('CD') or atom.name == 'CZ':
                     atom.solvent_radius = 2.00
             # scalar wmain set 1.78 sele (resnam TRP .and. (type CE* .or. type CD* .or. -
             #                           type CZ* .or. type CH2)) end
@@ -871,14 +883,15 @@ def charmm_radii(parm):
             # !Carbons
             elif atom.name.startswith('C'):
                 # from Table S5 (https://pubs.acs.org/doi/10.1021/acs.jcim.1c00177)
-                if atom.type in [x[:4] for x in
+                l = len(atom.type)
+                if atom.type[:l] in [x[:l] for x in
                                  ['CG1N1', 'CG2D1', 'CG2D1O', 'CG2D2', 'CG2DC1', 'CG2O1', 'CG2O2',
                                   'CG2O4', 'CG2R51', 'CG2R53', 'CG2R61', 'CG2R62', 'CG2R63', 'CG2R67',
                                   'CG301', 'CG302', 'CG311', 'CG312', 'CG321', 'CG322', 'CG331',
                                   'CG3C50', 'CG3C51', 'CG3C52', 'CG3RC1']]:
                     atom.solvent_radius = 2.46
                 # from Table S5 (https://pubs.acs.org/doi/10.1021/acs.jcim.1c00177)
-                elif atom.type == 'CG2RC0'[:4]:
+                elif atom.type[:l] == 'CG2RC0'[:l]:
                     atom.solvent_radius = 2.12
                 else:
                     # scalar wmain set 2.3 sele chem C* end
@@ -886,15 +899,16 @@ def charmm_radii(parm):
 
             # !Oxygens
             elif atom.name.startswith('O'):
+                l = len(atom.type)
                 # from Table S5 (https://pubs.acs.org/doi/10.1021/acs.jcim.1c00177)
-                if atom.type in [x[:4] for x in ['OG2D1', 'OG2N1', 'OG301', 'OG302', 'OG303', 'OG311', 'OG312',
+                if atom.type[:l] in [x[:l] for x in ['OG2D1', 'OG2N1', 'OG301', 'OG302', 'OG303', 'OG311', 'OG312',
                                                  'OG3R60']]:
                     atom.solvent_radius = 1.64
                 # from Table S5 (https://pubs.acs.org/doi/10.1021/acs.jcim.1c00177)
-                elif atom.type == 'OG2D4'[:4]:
+                elif atom.type[:l] == 'OG2D4'[:l]:
                     atom.solvent_radius = 1.60
                 # from Table S5 (https://pubs.acs.org/doi/10.1021/acs.jcim.1c00177)
-                elif atom.type == 'OG2P1'[:4]:
+                elif atom.type[:l] == 'OG2P1'[:l]:
                     atom.solvent_radius = 1.49
                 else:
                     # scalar wmain set 1.8 sele chem O* end
@@ -902,8 +916,9 @@ def charmm_radii(parm):
 
             # !Nitrogens
             elif atom.name.startswith('N'):
+                l = len(atom.type)
                 # from Table S5 (https://pubs.acs.org/doi/10.1021/acs.jcim.1c00177)
-                if atom.type == 'NG2S1'[:4]:
+                if atom.type[:l] == 'NG2S1'[:l]:
                     atom.solvent_radius = 2.23
                 else:
                     # scalar wmain set 2.3 sele chem N* end
