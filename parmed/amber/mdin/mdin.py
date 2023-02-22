@@ -216,7 +216,7 @@ class Mdin(object):
                         temp_out = ','.join(map(lambda x: f"'{x}'", self.rism_nml[var]))
                         line = addOn(line, "%s=%s, " % (var, temp_out), file)
                     else:
-                        line = addOn(line, "%s=%s, " % (var, ', '.join(map(str, self.rism_nml[var]))), file)
+                        line = addOn(line, "%s=%s, " % (var, ','.join(map(str, self.rism_nml[var]))), file)
                 else:
                     line = addOn(line, "%s=%s, " % (var, self.rism_nml[var]), file)
 
@@ -236,7 +236,7 @@ class Mdin(object):
                 if isinstance(self.gbnsr6_nml_defaults[var], string_types):
                     line = addOn(line, "%s='%s', " % (var, self.gbnsr6_nml[var]), file)
                 else:
-                    line = addOn(line, "%s='%s', " % (var, self.gbnsr6_nml[var]), file)
+                    line = addOn(line, "%s=%s, " % (var, self.gbnsr6_nml[var]), file)
 
             # flush any remaining items that haven't been printed to the mdin file
             if len(line.strip()) != 0:

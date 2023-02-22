@@ -27,6 +27,6 @@ Boston, MA 02111-1307, USA.
 class gbnsr6:
 
     def __init__(self):
-        self.gbnsr6 = {'b': 0.028, 'epsin': 1.0, 'epsout': 78.5, 'istrng': 0.0, 'rs': 0.52, 'dprob': 1.4, 'space': 0.5,
-                       'arcres': 0.2, 'rbornstat': 0, 'dgij': 0, 'radiopt': 0, 'chagb': 0, 'roh': 0.586, 'tau': 1.47,
-                       'cavity_surften': 0.005}
+        self.gbnsr6 = {'b': 0.028, 'alpb': 1, 'epsin': 1.0, 'epsout': 78.5, 'istrng': 0.0, 'rs': 0.52, 'dprob': 1.4,
+                       'space': 0.5, 'arcres': 0.2, 'rbornstat': 0, 'dgij': 0, 'radiopt': 0, 'chagb': 0,
+                       'roh': 0.586, 'tau': 1.47, 'cavity_surften': 0.005}
