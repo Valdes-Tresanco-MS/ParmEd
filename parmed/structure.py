@@ -7,13 +7,14 @@ import math
 import os
 from collections import defaultdict
 from copy import copy, deepcopy
+import warnings
 
 import numpy as np
 
 from . import unit as u
 from . import residue
 from .constants import DEG_TO_RAD, SMALL
-from .exceptions import ParameterError
+from .exceptions import ParameterError, ParmedWarning
 from .geometry import (STANDARD_BOND_LENGTHS_SQUARED, box_lengths_and_angles_to_vectors,
                        box_vectors_to_lengths_and_angles, distance2)
 from .topologyobjects import (AcceptorDonor, Angle, Atom, AtomList, Bond, ChiralFrame, Cmap,
@@ -22,7 +23,7 @@ from .topologyobjects import (AcceptorDonor, Angle, Atom, AtomList, Bond, Chiral
                               OutOfPlaneExtraPointFrame, PiTorsion, ResidueList, StretchBend,
                               ThreeParticleExtraPointFrame, TorsionTorsion, TrackedList,
                               TrigonalAngle, TwoParticleExtraPointFrame, UnassignedAtomType,
-                              UreyBradley, Link, LocalCoordinatesFrame)
+                              UreyBradley, Link, LocalCoordinatesFrame, QualitativeBondType)
 from .utils import PYPY, find_atom_pairs, tag_molecules
 from .utils.decorators import needs_openmm
 from .vec3 import Vec3
@@ -495,7 +496,8 @@ class Structure:
         for b in self.bonds:
             c.bonds.append(
                 Bond(atoms[b.atom1.idx], atoms[b.atom2.idx],
-                     b.type and c.bond_types[b.type.idx], order=b.order)
+                     b.type and c.bond_types[b.type.idx], order=b.order,
+                     qualitative_type=b.qualitative_type)
             )
             c.bonds[-1].funct = b.funct
         for a in self.angles:
@@ -1119,16 +1121,14 @@ class Structure:
         scan = [x * y for x, y in zip(scan, selection)]
         # Copy all parameters
         struct = type(self)()
+        res_numbers_are_fake = {res.number for res in self.residues} == {0}
+        res_number_attr = "idx" if res_numbers_are_fake else "number"
         for i, atom in enumerate(self.atoms):
             if not selection[i]:
                 continue
             res = atom.residue
-            if res.number == 0:
-                num = res.idx
-            else:
-                num = res.number
-            struct.add_atom(copy(atom), res.name, num,
-                            res.chain, res.insertion_code, res.segid)
+            num = getattr(res, res_number_attr)
+            struct.add_atom(copy(atom), res.name, num, res.chain, res.insertion_code, res.segid)
 
         def copy_valence_terms(oval, otyp, sval, styp, atom_attrs, extra_attrs=None):
             """ Copies the valence terms from one list to another;
@@ -1166,7 +1166,7 @@ class Structure:
             if hasattr(otyp, 'claim'):
                 otyp.claim()
         copy_valence_terms(struct.bonds, struct.bond_types, self.bonds,
-                           self.bond_types, ['atom1', 'atom2'], ["order"])
+                           self.bond_types, ['atom1', 'atom2'], ["order", "qualitative_type"])
         copy_valence_terms(struct.angles, struct.angle_types, self.angles,
                            self.angle_types, ['atom1', 'atom2', 'atom3'])
         copy_valence_terms(struct.dihedrals, struct.dihedral_types,
@@ -1672,7 +1672,6 @@ class Structure:
             self.unchange()
 
         self._topology = top = app.Topology()
-        chain = top.addChain()
         try:
             last_chain = self.residues[0].chain
             last_residue = None
@@ -1680,6 +1679,7 @@ class Structure:
         except IndexError:
             # Empty topology
             return self._topology
+        chain = top.addChain(id=last_chain)
         # Add the atoms
         for i, atom in enumerate(self.atoms):
             # See if we need to add a new residue
@@ -1687,9 +1687,14 @@ class Structure:
                 # See if we need a new chain
                 if last_chain != atom.residue.chain:
                     last_chain = atom.residue.chain
-                    chain = top.addChain()
+                    chain = top.addChain(id=last_chain)
                 last_residue = atom.residue
-                last_omm_residue = top.addResidue(atom.residue.name, chain)
+                last_omm_residue = top.addResidue(
+                    atom.residue.name,
+                    chain,
+                    id=str(atom.residue.number),
+                    insertionCode=atom.residue.insertion_code,
+                )
             try:
                 elem = app.element.Element.getByAtomicNumber(
                     atom.atomic_number)
@@ -1697,9 +1702,28 @@ class Structure:
                 elem = None
             top.addAtom(atom.name, elem, last_omm_residue)
         # Add the bonds
+        bond_orders_by_openmm_type = {
+            app.Single: 1.0,
+            app.Double: 2.0,
+            app.Triple: 3.0,
+            app.Amide: 1.25,
+            app.Aromatic: 1.5,
+        }
         atoms = list(top.atoms())
         for bond in self.bonds:
-            top.addBond(atoms[bond.atom1.idx], atoms[bond.atom2.idx])
+            # Determine the bond type
+            type = None
+            for t, o in bond_orders_by_openmm_type.items():
+                if math.isclose(bond.order, o):
+                    type = t
+            # Determine the bond order (an integer)
+            order = None
+            n = round(bond.order)
+            if math.isclose(bond.order, n):
+                order = n
+            top.addBond(
+                atoms[bond.atom1.idx], atoms[bond.atom2.idx], type=type, order=order
+            )
         # Set the unit cell dimensions
         if self.box is not None:
             top.setPeriodicBoxVectors(
@@ -1772,7 +1796,7 @@ class Structure:
             if u.is_quantity(value):
                 value = value.value_in_unit(u.angstroms)
             value = list(value)
-            coords = np.array(value, dtype=np.float64, copy=False, subok=True)
+            coords = np.asanyarray(value, dtype=np.float64)
             coords = coords.reshape((-1, len(self.atoms), 3))
             if len(coords) > 0:
                 for a, xyz in zip(self.atoms, coords[0]):
@@ -1853,7 +1877,7 @@ class Structure:
                 box = value
             else:
                 box = _strip_box_units(list(value))
-            box = np.array(box, dtype=np.float64, copy=False, subok=True)
+            box = np.asanyarray(box, dtype=np.float64)
             if box.shape != (6,):
                 if len(box.shape) != 2 or box.shape[-1] != 6:
                     raise ValueError('Box information must be 6 floats')
@@ -1920,7 +1944,7 @@ class Structure:
                 except AttributeError:
                     pass
         else:
-            value = np.array(value, copy=False).reshape(
+            value = np.asarray(value).reshape(
                 (-1, len(self.atoms), 3))
             for atom, xyz in zip(self.atoms, value[0]):
                 atom.vx, atom.vy, atom.vz = xyz
@@ -2480,11 +2504,23 @@ class Structure:
                 force = proper
             if isinstance(tor.type, DihedralTypeList):
                 for typ in tor.type:
+                    if typ.per == 0:
+                        warnings.warn(
+                            "Torsion with 0-periodicity is being omitted. This will shift the energy by a constant, "
+                            "but will not affect forces", ParmedWarning
+                        )
+                        continue
                     force.addTorsion(tor.atom1.idx, tor.atom2.idx, tor.atom3.idx, tor.atom4.idx,
-                                     int(typ.per), typ.phase*DEG_TO_RAD, typ.phi_k*frc_conv)
+                                     abs(int(typ.per)), typ.phase*DEG_TO_RAD, typ.phi_k*frc_conv)
             else:
+                if tor.type.per == 0:
+                    warnings.warn(
+                        "Torsion with 0-periodicity is being omitted. This will shift the energy by a constant, "
+                        "but will not affect forces", ParmedWarning
+                    )
+                    continue
                 force.addTorsion(tor.atom1.idx, tor.atom2.idx, tor.atom3.idx, tor.atom4.idx,
-                                 int(tor.type.per), tor.type.phase*DEG_TO_RAD,
+                                 abs(int(tor.type.per)), tor.type.phase*DEG_TO_RAD,
                                  tor.type.phi_k*frc_conv)
         if proper.getNumTorsions() == 0:
             return improper
@@ -3797,7 +3833,7 @@ class Structure:
 
         def idx(thing):
             return thing.idx if thing is not None else None
-        retdict['bonds'] = [(b.atom1.idx, b.atom2.idx, idx(b.type))
+        retdict['bonds'] = [(b.atom1.idx, b.atom2.idx, idx(b.type), b.order, b.qualitative_type)
                             for b in self.bonds]
         retdict['angles'] = [(a.atom1.idx, a.atom2.idx, a.atom3.idx,
                               idx(a.type)) for a in self.angles]
@@ -3874,15 +3910,27 @@ class Structure:
                 return None
             return typelist[idx]
 
+        def assign_order(bond_tuple):
+            if len(bond_tuple) < 4:
+                return 1.0
+            return bond_tuple[3]
+
+        def assign_qualitative_type(bond_tuple):
+            if len(bond_tuple) < 5:
+                return None
+            qualitative_type = bond_tuple[4]
+            return QualitativeBondType(qualitative_type) if qualitative_type is not None else None
+
         # Set the topology arrays
         self.bonds = TrackedList(
-            Bond(self.atoms[it[0]], self.atoms[it[1]],
-                 type=assign_type(self.bond_types, it[2]))
+            Bond(
+                self.atoms[it[0]], self.atoms[it[1]], type=assign_type(self.bond_types, it[2]),
+                order=assign_order(it), qualitative_type=assign_qualitative_type(it),
+            )
             for it in d['bonds']
         )
         self.angles = TrackedList(
-            Angle(self.atoms[it[0]], self.atoms[it[1]], self.atoms[it[2]],
-                  type=assign_type(self.angle_types, it[3]))
+            Angle(self.atoms[it[0]], self.atoms[it[1]], self.atoms[it[2]], type=assign_type(self.angle_types, it[3]))
             for it in d['angles']
         )
         self.dihedrals = TrackedList(
@@ -3921,8 +3969,7 @@ class Structure:
         )
         self.pi_torsions = TrackedList(
             PiTorsion(self.atoms[it[0]], self.atoms[it[1]], self.atoms[it[2]], self.atoms[it[3]],
-                      self.atoms[it[4]], self.atoms[it[5]],
-                      type=assign_type(self.pi_torsion_types, it[6]))
+                      self.atoms[it[4]], self.atoms[it[5]], type=assign_type(self.pi_torsion_types, it[6]))
             for it in d['pi_torsions']
         )
         self.stretch_bends = TrackedList(
@@ -3932,8 +3979,7 @@ class Structure:
         )
         self.torsion_torsions = TrackedList(
             TorsionTorsion(self.atoms[it[0]], self.atoms[it[1]], self.atoms[it[2]],
-                           self.atoms[it[3]], self.atoms[it[4]],
-                           type=assign_type(self.torsion_torsion_types, it[5]))
+                           self.atoms[it[3]], self.atoms[it[4]], type=assign_type(self.torsion_torsion_types, it[5]))
             for it in d['torsion_torsions']
         )
         self.chiral_frames = TrackedList(
@@ -3943,8 +3989,7 @@ class Structure:
             MultipoleFrame(self.atoms[it[0]], *it[1:]) for it in d['multipole_frames']
         )
         self.adjusts = TrackedList(
-            NonbondedException(self.atoms[it[0]], self.atoms[it[1]],
-                               assign_type(self.adjust_types, it[2]))
+            NonbondedException(self.atoms[it[0]], self.atoms[it[1]], assign_type(self.adjust_types, it[2]))
             for it in d['adjusts']
         )
         self.acceptors = TrackedList(

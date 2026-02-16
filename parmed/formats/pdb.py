@@ -4,19 +4,21 @@ PDBx/mmCIF files.
 """
 from collections import OrderedDict, namedtuple, Counter
 from contextlib import closing
-from functools import lru_cache
+from functools import lru_cache, reduce
 from string import ascii_letters
 import io
-import ftplib
+import urllib
 import gzip
 import logging
+import urllib.error
+import urllib.request
 import numpy as np
 from ..exceptions import PDBError, PDBWarning
 from ..formats.pdbx import PdbxReader, PdbxWriter, containers
 from ..formats.registry import FileFormatType
 from ..periodic_table import AtomicNum, Mass, Element, element_by_name
 from ..residue import AminoAcidResidue, RNAResidue, DNAResidue, WATER_NAMES
-from ..modeller import StandardBiomolecularResidues, get_standard_residue_template_library
+from ..modeller import StandardBiomolecularResidues, get_standard_residue_template_library, get_nonstandard_ccd_residues
 from ..structure import Structure
 from ..topologyobjects import Atom, ExtraPoint, Bond, Link, QualitativeBondType
 from ..symmetry import Symmetry
@@ -97,32 +99,36 @@ def _number_truncated_to_n_digits(num, digits):
         return int(-(-num % eval(f'1e{digits - 1:d}')))
     return int(num % eval(f'1e{digits:d}'))
 
-@lru_cache(maxsize=4096)
-def _atom_name_to_atom_map(residue_name):
-    templates = get_standard_residue_template_library()
-    if residue_name not in templates:
-        return {}
-    return {atom.name: atom for atom in templates[residue_name].atoms}
+_ATOM_NAME_TO_ATOM_CACHE = {}
+def _atom_name_to_atom_map(residue_name, *reslibs):
+    if residue_name in _ATOM_NAME_TO_ATOM_CACHE:
+        return _ATOM_NAME_TO_ATOM_CACHE[residue_name]
+    for reslib in reslibs:
+        if residue_name in reslib:
+            _ATOM_NAME_TO_ATOM_CACHE[residue_name] = {atom.name: atom for atom in reslib[residue_name].atoms}
+    return _ATOM_NAME_TO_ATOM_CACHE.get(residue_name, {})
 
-@lru_cache(maxsize=4096)
-def _atom_name_to_bond_map(residue_name):
-    templates = get_standard_residue_template_library()
+_ATOM_NAME_TO_BOND_CACHE = {}
+def _atom_name_to_bond_map(residue_name, templates):
+    if residue_name in _ATOM_NAME_TO_BOND_CACHE:
+        return _ATOM_NAME_TO_BOND_CACHE[residue_name]
     if residue_name not in templates:
         return {}
     bond_type_map = {}
     for bond in templates[residue_name].bonds:
         bond_type_map[(bond.atom1.name, bond.atom2.name)] = bond.qualitative_type
         bond_type_map[(bond.atom2.name, bond.atom1.name)] = bond.qualitative_type
+    _ATOM_NAME_TO_BOND_CACHE[residue_name] = bond_type_map
     return bond_type_map
 
 def _replace_if_none(obj, template_obj, attribute):
     if getattr(obj, attribute) is None:
         setattr(obj, attribute, getattr(template_obj, attribute))
 
-def _map_atomic_properties_from_templates(structure: Structure):
+def _map_atomic_properties_from_templates(structure: Structure, *reslibs):
     """Modifies atoms in a structure in-place with attributes from the template"""
     for residue in structure.residues:
-        template_atom_map = _atom_name_to_atom_map(residue.name)
+        template_atom_map = _atom_name_to_atom_map(residue.name, *reslibs)
         for atom in residue.atoms:
             if atom.name not in template_atom_map:
                 continue
@@ -131,8 +137,8 @@ def _map_atomic_properties_from_templates(structure: Structure):
             _replace_if_none(atom, template_atom, "aromatic")
             _replace_if_none(atom, template_atom, "hybridization")
 
-def _map_bond_types_from_templates(structure: Structure):
-    templates = get_standard_residue_template_library()
+def _map_bond_types_from_templates(structure: Structure, *reslibs):
+    templates = reduce(lambda d1, d2: {**d2, **d1}, reslibs, {})
     for bond in structure.bonds:
         # Only assign bond types of bonds we recognize
         if bond.atom1.residue.name not in templates or bond.atom2.residue.name not in templates:
@@ -145,7 +151,7 @@ def _map_bond_types_from_templates(structure: Structure):
             bond.qualitative_type = QualitativeBondType.SINGLE
             continue
         # Otherwise they're both in the same residue, and should be in the template
-        bond_type_map = _atom_name_to_bond_map(bond.atom1.residue.name)
+        bond_type_map = _atom_name_to_bond_map(bond.atom1.residue.name, templates)
         qualitative_type = bond_type_map.get((bond.atom1.name, bond.atom2.name), None)
         bond.qualitative_type = qualitative_type
 
@@ -188,7 +194,7 @@ class PDBFile(metaclass=FileFormatType):
                         'ANISOU', 'CISPEP', 'CONECT', 'DBREF ', 'HELIX ', 'HET   ', 'LINK  ', 'MODRES',
                         'REVDAT', 'SEQADV', 'SHEET ', 'SSBOND', 'FORMUL', 'HETNAM', 'HETSYN', 'SEQRES', 'SITE  ',
                         'ENDMDL', 'MODEL ', 'TER   ', 'JRNL  ', 'REMARK', 'TER', 'DBREF ', 'DBREF2', 'DBREF1',
-                        'DBREF', 'HET', 'LINKR '}:
+                        'DBREF', 'HET', 'LINKR ', 'TURN  '}:
                     continue
                 # Hack to support reduce-added flags
                 elif line[:6] == 'USER  ' and line[6:9] == 'MOD':
@@ -307,16 +313,18 @@ class PDBFile(metaclass=FileFormatType):
             raise ValueError('pdb_id must be the 4-letter PDB code')
 
         pdb_id = pdb_id.lower()
-        ftp = ftplib.FTP('ftp.wwpdb.org', timeout=timeout)
-        ftp.login()
+        
+        url = (
+            'https://files.wwpdb.org/pub/pdb/data/structures/divided/pdb/%s/pdb%s.ent.gz'
+        ) % (pdb_id[1:3], pdb_id)
+
         fileobj = io.BytesIO()
         try:
-            ftp_loc = f"/pub/pdb/data/structures/divided/pdb/{pdb_id[1:3]}/pdb{pdb_id}.ent.gz"
-            ftp.retrbinary(f"RETR {ftp_loc}", fileobj.write)
-        except ftplib.all_errors as err:
+            with urllib.request.urlopen(url, timeout=timeout) as response:
+                fileobj.write(response.read())
+        except (urllib.error.URLError, urllib.error.HTTPError) as err:
             raise IOError(f"Could not retrieve PDB ID {pdb_id}; {err}") from err
-        finally:
-            ftp.close()
+
         # Rewind, wrap it in a GzipFile and send it to parse
         fileobj.seek(0)
         fileobj = io.TextIOWrapper(gzip.GzipFile(fileobj=fileobj, mode='r'))
@@ -345,7 +353,7 @@ class PDBFile(metaclass=FileFormatType):
         self.struct.related_entries = []
 
     @classmethod
-    def parse(cls, filename, skip_bonds=False, expanded_residue_template_match=False):
+    def parse(cls, filename, skip_bonds=False, expanded_residue_template_match=False, all_residue_template_match=False):
         """ Read a PDB file and return a populated `Structure` class
 
         Parameters
@@ -363,8 +371,13 @@ class PDBFile(metaclass=FileFormatType):
             element assignment if element information is not present in the PDB
             file already. Default is False.
         expanded_residue_template_match : bool, optional
-            If True, an expanded set of residue templates taken from the chemical component database is used
-            to assign bonds and atomic properties.
+            If True, an expanded set of amino and nucleic acid residue templates taken from the
+            chemical component database is used to assign bonds and atomic properties.
+        all_residue_template_match : bool, optional
+            If True, all residue templates taken from the chemical component database is used
+            to assign bonds and atomic properties. Note that loading the library for all known
+            3-letter residues is slow and memory-intensive. The library is cached after the
+            first use.
 
         Metadata
         --------
@@ -401,10 +414,11 @@ class PDBFile(metaclass=FileFormatType):
         Returns
         -------
         structure : :class:`Structure`
-            The Structure object initialized with all of the information from
-            the PDB file.  No bonds or other topological features are added by
-            default.
+            The Structure object initialized with all the information from the PDB
+            file.  No bonds or other topological features are added by default.
         """
+        if all_residue_template_match and not expanded_residue_template_match:
+            raise ValueError("all_residue_template_match cannot be True if expanded_residue_template_match is False")
         if expanded_residue_template_match and skip_bonds:
             raise ValueError("extended_residue_template_match cannot be True if skip_bonds is also True")
         if isinstance(filename, str):
@@ -427,9 +441,12 @@ class PDBFile(metaclass=FileFormatType):
         # Assign bonds based on standard templates and simple distances
         if not skip_bonds:
             if expanded_residue_template_match:
-                inst.struct.assign_bonds(get_standard_residue_template_library())
-                _map_atomic_properties_from_templates(inst.struct)
-                _map_bond_types_from_templates(inst.struct)
+                residue_libraries = [get_standard_residue_template_library()]
+                if all_residue_template_match:
+                    residue_libraries.append(get_nonstandard_ccd_residues())
+                inst.struct.assign_bonds(*residue_libraries)
+                _map_atomic_properties_from_templates(inst.struct, *residue_libraries)
+                _map_bond_types_from_templates(inst.struct, *residue_libraries)
             else:
                 inst.struct.assign_bonds()
 
@@ -439,8 +456,9 @@ class PDBFile(metaclass=FileFormatType):
         try:
             inst.struct.coordinates = inst._coordinates
         except ValueError:
-            raise PDBError('Coordinate shape mismatch. Probably caused by different atom counts in '
-                           'some of the PDB models')
+            raise PDBError(
+                'Coordinate shape mismatch. Probably caused by different atom counts in some of the PDB models'
+            )
 
         # Postprocess features of the PDB file we couldn't resolve until the end
         inst._process_structure_symmetry()
@@ -957,7 +975,7 @@ class PDBFile(metaclass=FileFormatType):
                 symm_line = "REMARK 290   SMTRY" + fmt % tuple(arr_list)
                 dest.write(symm_line)
         if coordinates is not None:
-            coords = np.array(coordinates, copy=False, subok=True)
+            coords = np.asanyarray(coordinates)
             try:
                 coords = coords.reshape((-1, len(struct.atoms), 3))
             except ValueError:
@@ -1166,17 +1184,18 @@ class CIFFile(metaclass=FileFormatType):
             raise ValueError('pdb_id must be the 4-letter PDB code')
 
         pdb_id = pdb_id.lower()
-        ftp = ftplib.FTP('ftp.wwpdb.org', timeout=timeout)
-        ftp.login()
+                
+        url = (
+            'https://files.wwpdb.org/pub/pdb/data/structures/divided/mmCIF/%s/%s.cif.gz'
+        ) % (pdb_id[1:3], pdb_id)
+        
         fileobj = io.BytesIO()
         try:
-            ftp.retrbinary('RETR /pub/pdb/data/structures/divided/mmCIF/'
-                           '%s/%s.cif.gz' % (pdb_id[1:3], pdb_id),
-                           fileobj.write)
-        except ftplib.all_errors as err:
-            raise IOError('Could not retrieve PDB ID %s; %s' % (pdb_id, err))
-        finally:
-            ftp.close()
+            with urllib.request.urlopen(url, timeout=timeout) as response:
+                fileobj.write(response.read())
+        except (urllib.error.URLError, urllib.error.HTTPError) as err:
+            raise IOError(f"Could not retrieve PDB ID {pdb_id}; {err}") from err
+        
         fileobj.seek(0)
         fileobj = io.TextIOWrapper(gzip.GzipFile(fileobj=fileobj, mode='r'))
         if saveto is not None:
@@ -1188,7 +1207,7 @@ class CIFFile(metaclass=FileFormatType):
     #===================================================
 
     @classmethod
-    def parse(cls, filename, skip_bonds=False, expanded_residue_template_match=False):
+    def parse(cls, filename, skip_bonds=False, expanded_residue_template_match=False, all_residue_template_match=False):
         """
         Read a PDBx or mmCIF file and return a populated `Structure` class
 
@@ -1206,6 +1225,9 @@ class CIFFile(metaclass=FileFormatType):
             being parsed simply for its coordinates. Default is False.
         expanded_residue_template_match : bool, optional
             If True, an expanded set of residue templates taken from the chemical component database is used
+            to assign bonds and atomic properties.
+        all_residue_template_match : bool, optional
+            If True, all residue templates taken from the chemical component database is used
             to assign bonds and atomic properties.
 
         Metadata
@@ -1256,6 +1278,8 @@ class CIFFile(metaclass=FileFormatType):
         If this occurs, check the formatting on each line and make sure it
         matches the others.
         """
+        if all_residue_template_match and not expanded_residue_template_match:
+            raise ValueError("all_residue_template_match cannot be True if expanded_residue_template_match is False")
         if expanded_residue_template_match and skip_bonds:
             raise ValueError("extended_residue_template_match cannot be True if skip_bonds is also True")
         if isinstance(filename, str):
@@ -1322,11 +1346,9 @@ class CIFFile(metaclass=FileFormatType):
                 volid = cite.getAttributeIndex('journal_volume')
                 rows = cite.getRowList()
                 if doiid != -1:
-                    struct.doi = ', '.join([row[doiid] for row in rows
-                                                if row[doiid] != '?'])
+                    struct.doi = ', '.join([row[doiid] for row in rows if row[doiid] != '?'])
                 if pmiid != -1:
-                    struct.pmid = ', '.join([row[pmiid] for row in rows
-                                                if row[pmiid] != '?'])
+                    struct.pmid = ', '.join([row[pmiid] for row in rows if row[pmiid] != '?'])
                 if titlid != -1:
                     struct.title = '; '.join([row[titlid] for row in rows])
                 if yearid != -1:
@@ -1343,8 +1365,7 @@ class CIFFile(metaclass=FileFormatType):
                 if textid != -1:
                     rows = keywds.getRowList()
                     struct.keywords = ', '.join([row[textid] for row in rows])
-                    struct.keywords = [key.strip() for key in
-                            struct.keywords.split(',') if key.strip()]
+                    struct.keywords = [key.strip() for key in struct.keywords.split(',') if key.strip()]
             dbase = cont.getObj('pdbx_database_related')
             if dbase is not None:
                 dbid = dbase.getAttributeIndex('db_id')
@@ -1352,7 +1373,7 @@ class CIFFile(metaclass=FileFormatType):
                 if dbid != -1 and nameid != -1:
                     rows = dbase.getRowList()
                     struct.related_entries = [(r[dbid],r[nameid]) for r in rows]
-            # Now go through all of the atoms. Any items that do *not* exist are
+            # Now go through all the atoms. Any items that do *not* exist are
             # given an index of -1. So we append an empty string on the end of
             # each row so that the default value for any un-specified value is
             # the empty string. This avoids needing any conditionals inside the
@@ -1461,9 +1482,8 @@ class CIFFile(metaclass=FileFormatType):
                 gammaid = cell.getAttributeIndex('angle_gamma')
                 row = cell.getRow(0)
                 struct.box = np.array(
-                        [float(row[aid]), float(row[bid]), float(row[cid]),
-                         float(row[alphaid]), float(row[betaid]),
-                         float(row[gammaid])]
+                    [float(row[aid]), float(row[bid]), float(row[cid]),
+                     float(row[alphaid]), float(row[betaid]), float(row[gammaid])]
                 )
             symmetry = cont.getObj('symmetry')
             if symmetry is not None:
@@ -1507,8 +1527,8 @@ class CIFFile(metaclass=FileFormatType):
                             u12 = float(row[u12id])
                             u13 = float(row[u13id])
                             u23 = float(row[u23id])
-                            if altloc == '.': altloc = ''
-                            if inscode in '?.': inscode = ''
+                            altloc = '' if altloc == '.' else altloc
+                            inscode = '' if inscode in '?.' else inscode
                             key = (resnum, resname, inscode, chain, atnum, altloc, atname)
                             atommap[key].anisou = np.array([u11, u22, u33, u12, u13, u23])
                     except (ValueError, KeyError):
@@ -1529,13 +1549,16 @@ class CIFFile(metaclass=FileFormatType):
             if all_coords:
                 struct._coordinates = np.array(all_coords).reshape((-1, len(struct.atoms), 3))
 
-        # Make sure we assign bonds for all of the structures we parsed
+        # Make sure we assign bonds for all the structures we parsed
         if not skip_bonds:
             for struct in structures:
                 if expanded_residue_template_match:
-                    struct.assign_bonds(get_standard_residue_template_library())
-                    _map_atomic_properties_from_templates(struct)
-                    _map_bond_types_from_templates(struct)
+                    residue_libraries = [get_standard_residue_template_library()]
+                    if all_residue_template_match:
+                        residue_libraries.append(get_nonstandard_ccd_residues())
+                    struct.assign_bonds(*residue_libraries)
+                    _map_atomic_properties_from_templates(struct, *residue_libraries)
+                    _map_bond_types_from_templates(struct, *residue_libraries)
                 else:
                     struct.assign_bonds()
         # Build the return value
@@ -1628,7 +1651,7 @@ class CIFFile(metaclass=FileFormatType):
         sym.append([struct.space_group])
         cont.append(sym)
         if coordinates is not None:
-            coords = np.array(coordinates, copy=False, subok=True)
+            coords = np.asanyarray(coordinates)
             try:
                 coords = coords.reshape((-1, len(struct.atoms), 3))
             except ValueError:
