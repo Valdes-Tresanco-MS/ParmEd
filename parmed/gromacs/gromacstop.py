@@ -1247,9 +1247,24 @@ class GromacsTopologyFile(Structure, TopFromStructureMixin, metaclass=FileFormat
             if c.type is not None: continue
             key = (_gettype(c.atom1), _gettype(c.atom2), _gettype(c.atom3),
                     _gettype(c.atom4), _gettype(c.atom5))
-            key = (key[0],key[1],key[2],key[3],key[1],key[2],key[3],key[4])
+            key = (key[0], key[1], key[2], key[3], key[1], key[2], key[3], key[4])
+
+            # gromacs 2026 implemented amber19sb ff using cmaps per residue in like
+            # C-* N-RESNAME XC-RESNAME C-RESNAME N-*. ParmEd doesn't understand this because it only uses the
+            # atom type. To avoid any mismatch, we play with the cmap_types defined by gromacs.
+            resname = c.atom1.residue.name
+            if len(resname) == 4 and resname[0].upper() in 'CN':
+                resname = resname[1:]
+            else:
+                resname = resname
+            key_g26 = (f"{key[0]}-*", f"{key[1]}-{resname}", f"{key[2]}-{resname}",
+                       f"{key[3]}-{resname}", f"{key[1]}-{resname}", f"{key[2]}-{resname}",
+                       f"{key[3]}-{resname}", f"{key[4]}-*")
             if key in params.cmap_types:
                 c.type = params.cmap_types[key]
+                c.type.used = True
+            elif key_g26 in params.cmap_types:
+                c.type = params.cmap_types[key_g26]
                 c.type.used = True
             else:
                 raise ParameterError('Not all cmap parameters found')
